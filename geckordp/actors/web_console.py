@@ -70,6 +70,7 @@ class WebConsoleActor(Actor):
         selected_object_actor="",
         inner_window_id=-1,
         mapped: dict | None = None,
+        force_async=False,
     ):
         args = {
             "to": self.actor_id,
@@ -87,7 +88,7 @@ class WebConsoleActor(Actor):
             args["innerWindowID"] = inner_window_id
         if mapped is not None:
             args["mapped"] = mapped
-        return self.client.send_receive(args)
+        return self.client.send_receive(args, force_async=force_async)
 
     def autocomplete(
         self,

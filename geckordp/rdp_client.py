@@ -25,6 +25,7 @@ class RDPClient:
     __READ_BULK_SINGLE_DIGITS = 90
     __MAX_READ_SIZE = 65536
     __NUMBER_LUT = bytes([0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39])
+    __POLL_INTV = 0.01
 
     class _HandlerEntry:
 
@@ -455,7 +456,7 @@ class RDPClient:
         self.__loop.call_soon_threadsafe(asyncio.ensure_future, self.__send(msg))
         return True
 
-    def send_receive(self, msg: dict, extract_expression="") -> dict:
+    def send_receive(self, msg: dict, extract_expression="", force_async=False) -> dict:
         """Starts sending a request and waiting for a response.
             The dictionary message will be transformed to a utf-8 json string.
             The timeout can be specified in the class its constructor.
@@ -484,11 +485,15 @@ class RDPClient:
             # the required functions without queue
             if get_ident() == self.__thread_id:
                 return cast(dict, self.__async_send_receive(msg, extract_expression))
+            elif force_async:
+                return asyncio.run_coroutine_threadsafe(
+                    cast(dict, self.__async_send_receive(msg, extract_expression, force_async)),
+                    self.__loop)
             # otherwise run the sync version to queue the 'send' function call
             # and wait for the result from the server
             return cast(dict, self.__sync_send_receive(msg, extract_expression))
 
-    async def __async_send_receive(self, msg: dict, extract_expression: str):
+    async def __async_send_receive(self, msg: dict, extract_expression: str, force_async=False):
         dlog("")
         fut = Future()
         await self.__send(msg, fut)
@@ -500,10 +505,15 @@ class RDPClient:
             if timeout_sec <= 0:
                 break
             try:
-                await asyncio.wait_for(
-                    self.__loop.create_task(self.__read(False)), timeout_sec
-                )
-            except:
+                if force_async:
+                    # read-loop already running in another thread
+                    await asyncio.sleep(RDPClient.__POLL_INTV)
+                else:
+                    await asyncio.wait_for(
+                        self.__loop.create_task(self.__read(False)), timeout_sec
+                    )
+            except Exception as e:
+                elog(f"Exception on request:\n{e}")
                 break
             if fut.done():
                 break
@@ -546,6 +556,9 @@ class RDPClient:
             return None
 
     async def __send(self, msg: dict, fut: Future | None = None):
+        # wait for other messages to pass
+        while self.__await_request_id != "":
+            await asyncio.sleep(RDPClient.__POLL_INTV)
         self.__await_request_id = msg["to"]
         if fut is not None:
             self.__await_request_fut = fut
@@ -833,11 +846,14 @@ class RDPClient:
                     wlog(f"Cannot queue task: {ex}")
 
     def __handle_single_request(self, response: dict | None, from_actor: str):
-        if self.__await_request_fut is None or from_actor != self.__await_request_id:
+        if from_actor != self.__await_request_id:
             return
         try:
             dlog("response valid, set result")
-            self.__await_request_fut.set_result(response)
+            if self.__await_request_fut is not None:
+                self.__await_request_fut.set_result(response)
+            self.__await_request_id = ""
+            self.__await_request_fut = None
         except:
             pass
 
