@@ -25,7 +25,8 @@ class RDPClient:
     __READ_BULK_SINGLE_DIGITS = 90
     __MAX_READ_SIZE = 65536
     __NUMBER_LUT = bytes([0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39])
-    __POLL_INTV = 0.01
+    __POLL_INTV = 0.004
+    __MAX_UNANSWERED = 16
 
     class _HandlerEntry:
 
@@ -88,8 +89,7 @@ class RDPClient:
         self.__header: RDPClient._BulkHeader | None = None
         self.__registered_events = set()
         self.__registered_events_expr = set()
-        self.__await_request_fut = Future()
-        self.__await_request_id = ""
+        self.__await_requests = []
         if executor is None:
             self.__workers = ThreadPoolExecutor(executor_workers)
         else:
@@ -344,12 +344,12 @@ class RDPClient:
             if self.__connected:
                 return None
             dlog("")
-            self.__await_request_id = "root"
-            self.__await_request_fut = Future()
+            fut = Future()
+            self.__await_requests.append(("root", fut))
             self.__loop_thread = Thread(target=self.__connect, args=[host, port])
             self.__loop_thread.start()
             try:
-                return self.__await_request_fut.result(self.__timeout_sec)
+                return fut.result(self.__timeout_sec)
             except:
                 dlog("Timeout")
                 if len(asyncio.all_tasks(self.__loop)) > 0:
@@ -557,11 +557,9 @@ class RDPClient:
 
     async def __send(self, msg: dict, fut: Future | None = None):
         # wait for other messages to pass
-        while self.__await_request_id != "":
+        while len(self.__await_requests) > RDPClient.__MAX_UNANSWERED:
             await asyncio.sleep(RDPClient.__POLL_INTV)
-        self.__await_request_id = msg["to"]
-        if fut is not None:
-            self.__await_request_fut = fut
+        self.__await_requests.append((msg["to"], fut))
 
         json_msg = json.dumps(msg, separators=(",", ":"))
 
@@ -846,14 +844,20 @@ class RDPClient:
                     wlog(f"Cannot queue task: {ex}")
 
     def __handle_single_request(self, response: dict | None, from_actor: str):
-        if from_actor != self.__await_request_id:
+        fut = None
+        # check earlier requests first, since responses are expected to arrive in this order
+        for i, awr in enumerate(self.__await_requests):
+            if awr[0] == from_actor:
+                fut = awr[1]
+                self.__await_requests.pop(i)
+                dlog("handled single request, remaining: %d" % len(self.__await_requests))
+                break
+        else:
             return
         try:
             dlog("response valid, set result")
-            if self.__await_request_fut is not None:
-                self.__await_request_fut.set_result(response)
-            self.__await_request_id = ""
-            self.__await_request_fut = None
+            if fut:
+                fut.set_result(response)
         except:
             pass
 
